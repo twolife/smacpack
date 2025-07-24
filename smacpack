@@ -1,0 +1,270 @@
+#! /usr/bin/python3
+# encoding=utf-8
+#
+# Copyright © 2024 Sébastien Noel <sebastien@twolife.be>
+# SPDX-License-Identifier: GPL-2.0-or-later
+import os
+import sys
+import sdl2
+import sdl2.ext
+from enum import Enum
+from PIL import Image, ImageFile
+from sdl2 import sdlmixer
+from sdl2.ext import FontTTF
+
+if os.path.isdir('/usr/share/smac'):
+    SMACDIR = '/usr/share/smac'
+elif os.path.isdir('/usr/share/games/smac'):
+    SMACDIR = '/usr/share/games/smac'
+else:
+    SMACDIR = os.path.dirname(os.path.realpath(__file__))
+
+
+def data_filename(filename: str) -> str:
+    return os.path.join(
+                SMACDIR,
+                'data',
+                filename,
+            )
+
+
+def is_in_rect(rect: sdl2.rect.SDL_Rect, x: int, y: int) -> bool:
+    return (x >= rect.x and (x < rect.x + rect.w)) and \
+           (y >= rect.y and (y < rect.y + rect.h))
+
+
+class Button(Enum):
+    SMAC = 1
+    SMACX = 2
+    CANCEL = 3
+
+
+class FlcFile(Enum):
+    FLARE = {'im': 'ax_flare.flc', 'x': 500, 'y': 700}
+    SMAC = {'im': 'ax_unity.flc', 'x': 430, 'y': 370}
+    SMACX = {'im': 'ax_alien.flc', 'x': 830, 'y': 430}
+
+
+class WavFile(Enum):
+    SMAC = 'fx/ax_unity.wav'
+    SMACX = 'fx/ax_alien_shot.wav'
+
+
+class SMACPack():
+    def __init__(self):
+        sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO | sdl2.SDL_INIT_AUDIO)
+        sdl2.sdlmixer.Mix_OpenAudio(22050, sdl2.sdlmixer.MIX_DEFAULT_FORMAT,
+                                    1, 1024)
+        centered = sdl2.SDL_WINDOWPOS_CENTERED
+        self.window = sdl2.ext.Window(
+                          'SMAC Planetary Pack',
+                          size=(1024, 768),
+                          position=(centered, centered),
+                      )
+        self.renderer = sdl2.ext.Renderer(self.window)
+
+        self.font = FontTTF(data_filename('fonts/arialb.ttf'),
+                            '15px', (255, 255, 255, 255))
+        self.font.add_style('green', '15px', (84, 172, 148, 255))
+        self.font.add_style('green_highlight', '15px', (176, 232, 188, 255))
+
+        self.highlight = None
+
+        self.sounds = {}
+        for data in WavFile:
+            self.sounds[data.name] = sdl2.sdlmixer.Mix_LoadWAV(
+                bytes(data_filename(data.value), 'utf-8')
+            )
+
+        self.anims = {}
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+        for data in FlcFile:
+            self.anims[data.name] = {
+                'im': Image.open(data_filename(data.value['im'])),
+                'count': 0,
+            }
+
+        self.background_image = self.init_background()
+
+    def init_background(self) -> sdl2.surface.SDL_Surface:
+        bg = sdl2.ext.load_img(data_filename('ax_background.pcx'))
+        border = sdl2.ext.load_img(data_filename('axstart_border.pcx'))
+
+        # Create a green version of 'bg'
+        bg_green = sdl2.SDL_DuplicateSurface(bg)
+        tmp = sdl2.SDL_DuplicateSurface(bg_green)
+        sdl2.ext.fill(tmp, sdl2.ext.Color(0, 95, 20))
+        sdl2.SDL_SetSurfaceAlphaMod(tmp, 100)
+        sdl2.SDL_BlitSurface(tmp, None, bg_green, None)
+        sdl2.SDL_FreeSurface(tmp)
+
+        # Create a big black surface 'tmp' and center 'bg_green' on it
+        tmp = sdl2.SDL_DuplicateSurface(border)
+        sdl2.ext.fill(tmp, 0)
+        rect = sdl2.rect.SDL_Rect(400, 300, 800, 600)
+        sdl2.SDL_BlitSurface(bg_green, None, tmp, rect)
+
+        # Create a big black surface 'final_bg' and center 'bg' on it
+        final_bg = sdl2.SDL_DuplicateSurface(border)
+        sdl2.ext.fill(final_bg, 0)
+        rect = sdl2.rect.SDL_Rect(400, 300, 800, 600)
+        sdl2.SDL_BlitSurface(bg, None, final_bg, rect)
+
+        # Apply 'border' with AlphaColorKey to 'tmp' (black -> alpha)
+        key = sdl2.pixels.SDL_MapRGB(border.format, 0, 0, 0)
+        sdl2.SDL_SetColorKey(border, True, key)
+        sdl2.SDL_BlitSurface(border, None, tmp, None)
+
+        # Apply 'tmp' with AlphaColorKey to 'final_bg' (pink -> alpha)
+        key = sdl2.pixels.SDL_MapRGB(border.format, 100, 16, 156)
+        sdl2.SDL_SetColorKey(tmp, True, key)
+        sdl2.SDL_BlitSurface(tmp, None, final_bg, None)
+
+        sdl2.SDL_FreeSurface(bg)
+        sdl2.SDL_FreeSurface(bg_green)
+        sdl2.SDL_FreeSurface(border)
+        sdl2.SDL_FreeSurface(tmp)
+
+        return final_bg
+
+    def show_splash_screen(self) -> None:
+        splash = sdl2.ext.load_img(data_filename('loki_logo1024.pcx'))
+        tx = sdl2.ext.Texture(self.renderer, splash)
+        sdl2.SDL_FreeSurface(splash)
+        self.renderer.copy(tx, dstrect=(0, 0))
+        tx.destroy()
+        self.renderer.present()
+        sdl2.SDL_Delay(3000)
+
+    def update_button(self) -> None:
+        color_d = 'green'
+        color_h = 'green_highlight'
+
+        color = color_h if self.highlight == Button.SMAC else color_d
+        txt_rendered = self.font.render_text('ALPHA CENTAURI',
+                                             color, width=200)
+        tx = sdl2.ext.Texture(self.renderer, txt_rendered)
+        self.renderer.copy(tx, dstrect=(610, 448))
+        tx.destroy()
+
+        color = color_h if self.highlight == Button.SMACX else color_d
+        txt_rendered = self.font.render_text('ALIEN CROSSFIRE',
+                                             color, width=200)
+        tx = sdl2.ext.Texture(self.renderer, txt_rendered)
+        self.renderer.copy(tx, dstrect=(610, 523))
+        tx.destroy()
+
+        color = color_h if self.highlight == Button.CANCEL else color_d
+        txt_rendered = self.font.render_text('CANCEL', color, width=200)
+        tx = sdl2.ext.Texture(self.renderer, txt_rendered)
+        self.renderer.copy(tx, dstrect=(610, 598))
+        tx.destroy()
+
+    def refresh_bg(
+            self,
+            bg: sdl2.surface.SDL_Surface,
+            animations: list,
+    ) -> None:
+        for anim in animations:
+            im = self.anims[anim]['im']
+            self.anims[anim]['count'] += 1
+            if self.anims[anim]['count'] >= im.n_frames:
+                self.anims[anim]['count'] = 1
+
+            im.seek(self.anims[anim]['count'])
+            surface = sdl2.ext.image.pillow_to_surface(im)
+            x = FlcFile[anim].value['x']
+            y = FlcFile[anim].value['y']
+            rect = sdl2.rect.SDL_Rect(x, y, im.width, im.height)
+            sdl2.SDL_BlitSurface(surface, None, bg, rect)
+            sdl2.SDL_FreeSurface(surface)
+
+        tx = sdl2.ext.Texture(self.renderer, bg)
+        self.renderer.copy(tx, srcrect=(288, 216, 1024, 768))
+        tx.destroy()
+
+        txt_rendered = self.font.render_text('CHOOSE YOUR WORLD', width=300)
+        tx = sdl2.ext.Texture(self.renderer, txt_rendered)
+        self.renderer.copy(tx, dstrect=(493, 101))
+        tx.destroy()
+
+        self.update_button()
+        self.renderer.present()
+
+    def launch(self, app: str) -> None:
+        try:
+            os.execvp(app, [app])
+        except OSError as e:
+            print("%s: %s" % (app, e))
+
+    def run(self) -> int:
+        rect_button_smac = sdl2.rect.SDL_Rect(575, 435, 295, 55)
+        rect_button_smacx = sdl2.rect.SDL_Rect(575, 510, 295, 55)
+        rect_button_quit = sdl2.rect.SDL_Rect(575, 585, 295, 55)
+        rect_anim_smac = sdl2.rect.SDL_Rect(142, 154, 320, 256)
+        rect_anim_smacx = sdl2.rect.SDL_Rect(542, 214, 274, 205)
+
+        self.window.show()
+        self.show_splash_screen()
+
+        running = True
+        animations = ['FLARE']
+        while running:
+            bg = sdl2.SDL_DuplicateSurface(self.background_image)
+
+            events = sdl2.ext.get_events()
+            for event in events:
+                if event.type == sdl2.SDL_QUIT:
+                    running = False
+                    break
+                elif event.type == sdl2.SDL_MOUSEBUTTONDOWN:
+                    x = event.motion.x
+                    y = event.motion.y
+                    if is_in_rect(rect_button_smac, x, y):
+                        self.launch('smac')
+                    elif is_in_rect(rect_button_smacx, x, y):
+                        self.launch('smacx')
+                    elif is_in_rect(rect_button_quit, x, y):
+                        running = False
+                elif event.type == sdl2.SDL_MOUSEMOTION:
+                    x = event.motion.x
+                    y = event.motion.y
+                    if is_in_rect(rect_button_smac, x, y) or \
+                       is_in_rect(rect_anim_smac, x, y):
+                        if self.highlight != Button.SMAC:
+                            self.highlight = Button.SMAC
+                            sdlmixer.Mix_PlayChannel(-1,
+                                                     self.sounds['SMAC'], -1)
+                            animations.append('SMAC')
+                    elif is_in_rect(rect_button_smacx, x, y) or is_in_rect(
+                                    rect_anim_smacx, x, y):
+                        if self.highlight != Button.SMACX:
+                            self.highlight = Button.SMACX
+                            sdlmixer.Mix_PlayChannel(-1,
+                                                     self.sounds['SMACX'], -1)
+                            animations.append('SMACX')
+                    elif is_in_rect(rect_button_quit, x, y):
+                        if self.highlight != Button.CANCEL:
+                            self.highlight = Button.CANCEL
+                    else:
+                        if self.highlight is not None:
+                            if self.highlight != Button.CANCEL:
+                                animations.remove(self.highlight.name)
+                                self.anims[self.highlight.name]['count'] = 0
+                            self.highlight = None
+                            sdlmixer.Mix_HaltChannel(-1)
+
+            self.refresh_bg(bg, animations)
+            sdl2.SDL_FreeSurface(bg)
+            sdl2.SDL_Delay(70)
+
+        sdlmixer.Mix_CloseAudio()
+        sdl2.ext.quit()
+        return 0
+
+
+if __name__ == "__main__":
+    os.environ['SDL_VIDEO_WAYLAND_WMCLASS'] = 'smacpack'
+    os.environ['SDL_VIDEO_X11_WMCLASS'] = 'smacpack'
+    smackpack = SMACPack()
+    sys.exit(smackpack.run())
